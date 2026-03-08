@@ -21,7 +21,7 @@ export async function POST(req: Request) {
     }
 
     // Call Nano Banana 2 (Gemini 3.1 Flash Image Preview) to generate the image
-    const finalPrompt = `${prompt}\n\nConstraint: Show full body/subject, zoomed out, no cropping.`;
+    const finalPrompt = prompt;
 
     // Note: The @google/genai SDK expects these nested config objects for the newest models.
     const response = await ai.models.generateContent({
