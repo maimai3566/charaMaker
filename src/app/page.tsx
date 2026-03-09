@@ -3,6 +3,10 @@
 import { useState } from "react";
 import ImageProcessor from "@/components/ImageProcessor";
 import { useCharacterHistory } from "@/hooks/useCharacterHistory";
+import GameDataForm from "@/components/GameDataForm";
+import MasterListData from "@/components/MasterListData";
+import { MonsterMasterData, monsterMasterRepository } from "@/data/repository/MonsterMasterRepository";
+import { useEffect } from "react";
 
 const PRESET_PROMPT =
   "Sprite sheet with exactly four evenly spaced horizontal poses of the same character. The character must be drawn SMALL and CENTERED within each pose space, leaving plenty of empty white space around it to ensure absolutely no cropping. Do NOT draw boxes, borders, or panels separating the poses. Solid white background, clear THICK black outer lines on the character only. Cartoon style. High contrast.";
@@ -19,7 +23,34 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState(false);
 
+  // New states for Manage Mode
+  const [viewMode, setViewMode] = useState<'generate' | 'manage'>('generate');
+  const [selectedForMaster, setSelectedForMaster] = useState<string | null>(null);
+  const [editMonster, setEditMonster] = useState<MonsterMasterData | null>(null);
+  const [masterMonsters, setMasterMonsters] = useState<MonsterMasterData[]>([]);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+
   const { history, isLoading, saveToHistory, deleteFromHistory } = useCharacterHistory();
+
+  const fetchMasterData = async () => {
+    try {
+      const data = await monsterMasterRepository.getAll();
+      setMasterMonsters(data);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  useEffect(() => {
+    fetchMasterData();
+  }, [refreshTrigger, viewMode]);
+
+  // Filter out history items that are already in master data (by spriteUrl)
+  const registeredUrls = new Set(masterMonsters.map(m => m.spriteUrl));
+  const filteredHistory = history.filter(item => {
+    const url = item.imageUrl || (item.imageBase64 ? `data:image/webp;base64,${item.imageBase64}` : "");
+    return !registeredUrls.has(url);
+  });
 
   const plannedPrompt = prompt ? `${prompt}${animationStyle ? `\n[Animation: ${animationStyle} loop]` : ""}\n\n${PRESET_PROMPT}` : "";
 
@@ -108,11 +139,35 @@ export default function Home() {
     }
   };
 
+  const handleEdit = (monster: MonsterMasterData) => {
+    setSelectedForMaster(monster.spriteUrl);
+    setEditMonster(monster);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   return (
     <main className="min-h-screen p-8 bg-gray-50 flex flex-col items-center">
-      <div className="w-full max-w-4xl bg-white p-8 rounded-xl shadow-sm">
-        <h1 className="text-3xl font-bold mb-6 text-gray-800">Chara-Maker</h1>
+      <div className="w-full max-w-4xl bg-white p-8 rounded-xl shadow-sm mb-6 flex justify-between items-center border-b-4 border-gray-100">
+        <h1 className="text-3xl font-extrabold text-gray-800 tracking-tight">Chara-Maker & CMS</h1>
+        
+        <div className="flex bg-gray-100 p-1 rounded-lg">
+          <button
+            onClick={() => { setViewMode('generate'); setSelectedForMaster(null); }}
+            className={`px-6 py-2 rounded-md font-bold text-sm transition-all ${viewMode === 'generate' ? 'bg-white shadow text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}
+          >
+            🎨 画像生成モード
+          </button>
+          <button
+            onClick={() => setViewMode('manage')}
+            className={`px-6 py-2 rounded-md font-bold text-sm transition-all ${viewMode === 'manage' ? 'bg-white shadow text-indigo-700' : 'text-gray-500 hover:text-gray-700'}`}
+          >
+            🗄️ ゲームデータ作成
+          </button>
+        </div>
+      </div>
 
+      {viewMode === 'generate' && (
+      <div className="w-full max-w-4xl bg-white p-8 rounded-xl shadow-sm">
         <div className="mb-6">
           <label className="block text-sm font-medium text-gray-700 mb-2">
             デザインの指定（Character/Subject Prompt）
@@ -257,17 +312,47 @@ export default function Home() {
           </div>
         )}
       </div>
+      )}
+
+      {viewMode === 'manage' && (
+        <div className="w-full max-w-4xl space-y-8">
+          {selectedForMaster && (
+            <GameDataForm 
+              imageUrl={selectedForMaster} 
+              editMonster={editMonster}
+              allMonsterIds={masterMonsters.map(m => m.id)}
+              designPrompt={prompt}
+              onCancel={() => {
+                setSelectedForMaster(null);
+                setEditMonster(null);
+              }}
+              onSuccess={() => {
+                alert(editMonster ? "データを更新しました！" : "マスターデータへの登録が完了しました！");
+                setSelectedForMaster(null);
+                setEditMonster(null);
+                setRefreshTrigger(prev => prev + 1);
+              }}
+            />
+          )}
+
+          <MasterListData 
+            onEdit={handleEdit} 
+            refreshTrigger={refreshTrigger} 
+          />
+        </div>
+      )}
 
       {/* History UI */}
       <div className="mt-8 w-full max-w-4xl bg-white p-8 rounded-xl shadow-sm">
         <h2 className="text-2xl font-bold mb-6 text-gray-800">生成履歴 (History)</h2>
+        <p className="text-xs text-gray-400 mb-4">※登録済みの画像はここには表示されません</p>
         {isLoading ? (
           <p className="text-gray-500">読み込み中...</p>
-        ) : history.length === 0 ? (
-          <p className="text-gray-500">履歴はありません。</p>
+        ) : filteredHistory.length === 0 ? (
+          <p className="text-gray-500">対象の履歴はありません。</p>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
-            {history.map((item) => (
+            {filteredHistory.map((item) => (
               <div key={item.id} className="border border-gray-200 rounded-lg p-4 flex flex-col items-center shadow-sm">
                 <img
                   src={item.imageUrl || (item.imageBase64 ? `data:image/webp;base64,${item.imageBase64}` : "")}
@@ -279,15 +364,32 @@ export default function Home() {
                   {item.prompt}
                 </p>
                 <div className="mt-4 w-full flex justify-between">
-                  <button
-                    onClick={() => loadFromHistory(item)}
-                    className="text-sm text-blue-600 hover:text-blue-800 font-medium"
-                  >
-                    選択
-                  </button>
+                  {viewMode === 'generate' ? (
+                     <button
+                       onClick={() => loadFromHistory(item)}
+                       className="text-sm text-blue-600 hover:text-blue-800 font-bold bg-blue-50 px-3 py-1 rounded"
+                     >
+                       プロンプト読込
+                     </button>
+                  ) : (
+                      <button
+                        onClick={() => {
+                           window.scrollTo({ top: 0, behavior: 'smooth' });
+                           setSelectedForMaster(item.imageUrl || (item.imageBase64 ? `data:image/webp;base64,${item.imageBase64}` : ""));
+                           // Extract original prompt from history item
+                           if (item.prompt) {
+                             const match = item.prompt.match(/^(.*?)\s*\((.*?)\)$/);
+                             setPrompt(match ? match[1] : item.prompt);
+                           }
+                        }}
+                        className="text-sm text-indigo-600 hover:text-indigo-800 font-bold bg-indigo-50 px-3 py-1 rounded"
+                      >
+                        マスター登録へ
+                      </button>
+                  )}
                   <button
                     onClick={() => deleteFromHistory(item.id)}
-                    className="text-sm text-red-500 hover:text-red-700 font-medium"
+                    className="text-sm text-red-500 hover:text-red-700 font-medium px-2"
                   >
                     削除
                   </button>

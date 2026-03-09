@@ -42,10 +42,24 @@ export async function POST(req: Request) {
       } as any,
     });
 
-    const base64Image = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    const candidate = response.candidates?.[0];
+    const base64Image = candidate?.content?.parts?.[0]?.inlineData?.data;
 
     if (!base64Image) {
-      throw new Error("Failed to generate image data (no inlineData found in response parts).");
+      console.error("Gemini Response Error:", JSON.stringify(response, null, 2));
+      const finishReason = candidate?.finishReason;
+      const safetyRatings = candidate?.safetyRatings;
+      let errorMessage = "Failed to generate image data (no inlineData found in response parts).";
+      
+      if (finishReason === "SAFETY") {
+        errorMessage = "安全フィルターにより生成が中断されました。プロンプトを見直してください。 (Safety Filter triggered)";
+      } else if (finishReason === "RECITATION") {
+        errorMessage = "著作権等の制限により生成が中断されました。 (Recitation/Copyright trigger)";
+      } else if (finishReason) {
+        errorMessage = `生成が中断されました (理由: ${finishReason})`;
+      }
+
+      throw new Error(errorMessage);
     }
 
     // Return the base64 image string
