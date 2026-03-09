@@ -3,10 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 
 interface ImageProcessorProps {
-  base64Image: string;
+  imageSource: string;
+  onProcessed?: (webpBase64: string) => void;
+  isFromHistory?: boolean;
 }
 
-export default function ImageProcessor({ base64Image }: ImageProcessorProps) {
+export default function ImageProcessor({ imageSource, onProcessed, isFromHistory }: ImageProcessorProps) {
   const finalCanvasRef = useRef<HTMLCanvasElement>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement>(null);
   const [isProcessing, setIsProcessing] = useState(true);
@@ -43,11 +45,19 @@ export default function ImageProcessor({ base64Image }: ImageProcessorProps) {
     const processImage = async () => {
       setIsProcessing(true);
       const img = new Image();
-      img.src = `data:image/png;base64,${base64Image}`;
+      if (!isFromHistory) {
+        // Only require CORS if we need to process pixel data (base64 from API doesn't have CORS issues anyway)
+        img.crossOrigin = "anonymous";
+      }
+      img.src = imageSource;
 
-      await new Promise((resolve) => {
+      await new Promise((resolve, reject) => {
         img.onload = resolve;
-      });
+        img.onerror = (err) => {
+          console.error("Failed to load image in ImageProcessor:", err);
+          reject(err);
+        };
+      }).catch(console.error);
 
       const finalCanvas = finalCanvasRef.current;
       if (!finalCanvas) return;
@@ -57,6 +67,13 @@ export default function ImageProcessor({ base64Image }: ImageProcessorProps) {
 
       finalCanvas.width = FINAL_WIDTH;
       finalCanvas.height = FRAME_HEIGHT;
+
+      if (isFromHistory) {
+        ctx.clearRect(0, 0, FINAL_WIDTH, FRAME_HEIGHT);
+        ctx.drawImage(img, 0, 0, FINAL_WIDTH, FRAME_HEIGHT);
+        setIsProcessing(false);
+        return;
+      }
 
       // The generated image is 16:9 (e.g., 1024x576 or 1536x864)
       const sectionWidth = img.width / TOTAL_FRAMES;
@@ -101,11 +118,36 @@ export default function ImageProcessor({ base64Image }: ImageProcessorProps) {
         );
       }
 
+      // 背景透過（白に近い色を透明にする）
+      const imageData = ctx.getImageData(0, 0, FINAL_WIDTH, FRAME_HEIGHT);
+      const data = imageData.data;
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        // 白に近い色（240以上）ならアルファ値を0（透明）にする
+        if (r >= 240 && g >= 240 && b >= 240) {
+          data[i + 3] = 0;
+        }
+      }
+      ctx.putImageData(imageData, 0, 0);
+
+      // 処理完了した画像をWebPとしてエクスポートし、親コンポーネントに返す
+      if (onProcessed) {
+        // "data:image/webp;base64,..." の形式で取得
+        const dataUrl = finalCanvas.toDataURL("image/webp", 0.8);
+        // "data:image/webp;base64," の部分を取り除いて返す
+        const base64 = dataUrl.split(",")[1];
+        if (base64) {
+          onProcessed(base64);
+        }
+      }
+
       setIsProcessing(false);
     };
 
     processImage();
-  }, [base64Image]);
+  }, [imageSource, onProcessed, isFromHistory]);
 
   // Handle animation preview drawing
   useEffect(() => {
@@ -137,18 +179,41 @@ export default function ImageProcessor({ base64Image }: ImageProcessorProps) {
 
   }, [frameIndex, isProcessing]);
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
+    if (isFromHistory) {
+      // Direct download for history item bypassing tainted canvas
+      try {
+        const response = await fetch(imageSource);
+        const blob = await response.blob();
+        const blobUrl = window.URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = blobUrl;
+        link.download = `character_history_${Date.now()}.webp`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(blobUrl);
+      } catch (e) {
+        console.error("Download failed", e);
+        window.open(imageSource, '_blank');
+      }
+      return;
+    }
+
     const canvas = finalCanvasRef.current;
     if (!canvas) return;
 
-    const dataUrl = canvas.toDataURL("image/png");
-    const link = document.createElement("a");
-    link.href = dataUrl;
-    // Naming according to requirements (MVP simple random ID or timestamp)
-    link.download = `character_${Date.now()}.png`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    try {
+      const dataUrl = canvas.toDataURL("image/webp", 0.8);
+      const link = document.createElement("a");
+      link.href = dataUrl;
+      link.download = `character_${Date.now()}.webp`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (e) {
+      console.error("Canvas export failed (possibly tainted)", e);
+    }
   };
 
   return (
@@ -170,7 +235,7 @@ export default function ImageProcessor({ base64Image }: ImageProcessorProps) {
             disabled={isProcessing}
             className="mt-4 px-6 py-2 bg-green-600 text-white font-medium rounded hover:bg-green-700 disabled:opacity-50 transition-colors"
           >
-            ダウンロード (PNG)
+            ダウンロード (WebP)
           </button>
         </div>
 
@@ -183,12 +248,7 @@ export default function ImageProcessor({ base64Image }: ImageProcessorProps) {
               className="block"
               style={{ width: "200px", height: "200px" }}
             />
-            {/* Phase 2: Background Removal Hook Point */}
-            {/* 
-              <button className="absolute bottom-2 right-2 bg-blue-500/80 text-white text-xs px-2 py-1 rounded" onClick={handleRemoveBackground}>
-                背景を透過
-              </button>
-            */}
+            {/* Background is now automatically removed during processing */}
           </div>
           <p className="mt-2 text-sm text-gray-500 font-mono">Frame: {frameIndex + 1} / 4</p>
         </div>

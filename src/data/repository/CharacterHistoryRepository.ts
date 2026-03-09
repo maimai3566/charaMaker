@@ -1,7 +1,8 @@
 export interface CharacterHistoryItem {
   id: string;
   prompt: string;
-  imageBase64: string; // The raw 16:9 base64 image
+  imageBase64?: string; // For local backward compatibility
+  imageUrl?: string;    // For Firebase Storage
   createdAt: number;
 }
 

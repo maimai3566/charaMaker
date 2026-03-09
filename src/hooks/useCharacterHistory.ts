@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { CharacterHistoryItem } from "@/data/repository/CharacterHistoryRepository";
-import { historyRepository } from "@/data/repository/LocalHistoryRepository";
+import { historyRepository } from "@/data/repository/FirestoreHistoryRepository";
 
 export function useCharacterHistory() {
   const [history, setHistory] = useState<CharacterHistoryItem[]>([]);

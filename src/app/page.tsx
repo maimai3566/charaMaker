@@ -11,7 +11,11 @@ export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [animationStyle, setAnimationStyle] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
-  const [generatedImageBase64, setGeneratedImageBase64] = useState<string | null>(null);
+  const [generatedImageSource, setGeneratedImageSource] = useState<string | null>(null);
+  const [processedWebP, setProcessedWebP] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isFromHistory, setIsFromHistory] = useState(false);
+  const [lastUsedPrompt, setLastUsedPrompt] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState(false);
 
@@ -24,7 +28,9 @@ export default function Home() {
 
     setIsGenerating(true);
     setError(null);
-    setGeneratedImageBase64(null);
+    setGeneratedImageSource(null);
+    setProcessedWebP(null);
+    setIsFromHistory(false);
     setCopySuccess(false);
 
     try {
@@ -40,9 +46,9 @@ export default function Home() {
         throw new Error(data.error || "Generation failed");
       }
 
-      setGeneratedImageBase64(data.imageBase64);
-      // Save the generated item to local history (saving just the user prompt, not the giant preset)
-      await saveToHistory(`${prompt} (${animationStyle || '待機'})`, data.imageBase64);
+      setGeneratedImageSource(`data:image/png;base64,${data.imageBase64}`);
+      setLastUsedPrompt(`${prompt} (${animationStyle || '待機'})`);
+      // We no longer save to history here. We wait for ImageProcessor to convert to WebP.
     } catch (err: any) {
       console.error(err);
       setError(err.message);
@@ -51,10 +57,43 @@ export default function Home() {
     }
   };
 
-  const loadFromHistory = (imageBase64: string) => {
-    setGeneratedImageBase64(imageBase64);
-    // Note: We don't restore the exact prompt string here since it's combined, 
-    // but the user can see the image
+  const handleProcessedImage = (webpBase64: string) => {
+    // Just store the processed WebP in state to enable the save button
+    setProcessedWebP(webpBase64);
+  };
+
+  const handleSaveToFirebase = async () => {
+    if (!processedWebP) return;
+    setIsSaving(true);
+    try {
+      await saveToHistory(lastUsedPrompt, processedWebP);
+      setIsFromHistory(true); // Treat as 'from history' once saved so button hides
+    } catch (err) {
+      console.error("Failed to save to history:", err);
+      setError("Firebaseへの保存に失敗しました。");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const loadFromHistory = (item: any) => { // Use 'any' or proper type CharacterHistoryItem
+    const source = item.imageUrl || (item.imageBase64 ? `data:image/webp;base64,${item.imageBase64}` : "");
+    if (!source) return;
+    setGeneratedImageSource(source);
+    setIsFromHistory(true);
+
+    if (item.prompt) {
+      const match = item.prompt.match(/^(.*?)\s*\((.*?)\)$/);
+      if (match && match.length === 3) {
+        setPrompt(match[1]);
+        const anim = match[2] === '待機' ? '' : match[2];
+        setAnimationStyle(anim);
+      } else {
+        setPrompt(item.prompt);
+        setAnimationStyle("");
+      }
+    }
+
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -194,10 +233,27 @@ export default function Home() {
         </div>
 
         {/* Display the raw generated image and processor */}
-        {generatedImageBase64 && (
+        {generatedImageSource && (
           <div className="mt-8 border-t pt-8">
             <h2 className="text-xl font-bold mb-4">スプライトシート構築 (Sprite Sheet Processing)</h2>
-            <ImageProcessor base64Image={generatedImageBase64} />
+            <ImageProcessor 
+              imageSource={generatedImageSource} 
+              onProcessed={isFromHistory ? undefined : handleProcessedImage} 
+              isFromHistory={isFromHistory}
+            />
+            
+            {/* Manual Save Button */}
+            {!isFromHistory && processedWebP && (
+              <div className="mt-6 flex justify-center">
+                <button
+                  onClick={handleSaveToFirebase}
+                  disabled={isSaving}
+                  className="px-8 py-3 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 shadow-md transition-colors disabled:opacity-50"
+                >
+                  {isSaving ? "保存中... (Saving)" : "画像を登録 (Firebaseへ保存)"}
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -214,17 +270,17 @@ export default function Home() {
             {history.map((item) => (
               <div key={item.id} className="border border-gray-200 rounded-lg p-4 flex flex-col items-center shadow-sm">
                 <img
-                  src={`data:image/png;base64,${item.imageBase64}`}
+                  src={item.imageUrl || (item.imageBase64 ? `data:image/webp;base64,${item.imageBase64}` : "")}
                   alt="History thumbnail"
                   className="w-full h-auto rounded cursor-pointer hover:opacity-80 transition-opacity"
-                  onClick={() => loadFromHistory(item.imageBase64)}
+                  onClick={() => loadFromHistory(item)}
                 />
                 <p className="text-xs mt-3 text-gray-600 line-clamp-2 w-full text-left" title={item.prompt}>
                   {item.prompt}
                 </p>
                 <div className="mt-4 w-full flex justify-between">
                   <button
-                    onClick={() => loadFromHistory(item.imageBase64)}
+                    onClick={() => loadFromHistory(item)}
                     className="text-sm text-blue-600 hover:text-blue-800 font-medium"
                   >
                     選択
