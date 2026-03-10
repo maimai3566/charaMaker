@@ -11,7 +11,7 @@ const ai = new GoogleGenAI({ apiKey });
 
 export async function POST(req: Request) {
   try {
-    const { prompt } = await req.json();
+    const { prompt, aspectRatio } = await req.json();
 
     if (!prompt) {
       return NextResponse.json(
@@ -31,11 +31,8 @@ export async function POST(req: Request) {
         thinkingConfig: {
           thinkingLevel: "MINIMAL" as any,
         },
-        // Note: imageSize and personGeneration are currently omitted
-        // because the public Gemini API does not fully support them yet, 
-        // even though they may appear in AI Studio code exports.
         imageConfig: {
-          aspectRatio: "4:1",
+          aspectRatio: aspectRatio || "4:1",
           imageSize: "512",
         },
         responseModalities: ["IMAGE"],
