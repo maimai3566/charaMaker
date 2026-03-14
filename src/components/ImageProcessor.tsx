@@ -70,7 +70,23 @@ export default function ImageProcessor({ imageSource, onProcessed, isFromHistory
 
       if (isFromHistory) {
         ctx.clearRect(0, 0, FINAL_WIDTH, FRAME_HEIGHT);
+        // Ensure even history images (1024x256) are drawn scaled into the 800x200 canvas
         ctx.drawImage(img, 0, 0, FINAL_WIDTH, FRAME_HEIGHT);
+        
+        // Ensure background transparency logic runs for history images too
+        // (Though they should already be transparent, this enforces the same export path)
+        const imageData = ctx.getImageData(0, 0, FINAL_WIDTH, FRAME_HEIGHT);
+        const data = imageData.data;
+        for (let i = 0; i < data.length; i += 4) {
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          if (r >= 240 && g >= 240 && b >= 240) {
+            data[i + 3] = 0;
+          }
+        }
+        ctx.putImageData(imageData, 0, 0);
+
         setIsProcessing(false);
         return;
       }
@@ -134,8 +150,8 @@ export default function ImageProcessor({ imageSource, onProcessed, isFromHistory
 
       // 処理完了した画像をWebPとしてエクスポートし、親コンポーネントに返す
       if (onProcessed) {
-        // "data:image/webp;base64,..." の形式で取得
-        const dataUrl = finalCanvas.toDataURL("image/webp", 0.8);
+        // "data:image/webp;base64,..." の形式で取得。容量削減のため品質を0.6に設定。
+        const dataUrl = finalCanvas.toDataURL("image/webp", 0.6);
         // "data:image/webp;base64," の部分を取り除いて返す
         const base64 = dataUrl.split(",")[1];
         if (base64) {
@@ -180,39 +196,24 @@ export default function ImageProcessor({ imageSource, onProcessed, isFromHistory
   }, [frameIndex, isProcessing]);
 
   const handleDownload = async () => {
-    if (isFromHistory) {
-      // Direct download for history item bypassing tainted canvas
-      try {
-        const response = await fetch(imageSource);
-        const blob = await response.blob();
-        const blobUrl = window.URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = blobUrl;
-        link.download = `character_history_${Date.now()}.webp`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        window.URL.revokeObjectURL(blobUrl);
-      } catch (e) {
-        console.error("Download failed", e);
-        window.open(imageSource, '_blank');
-      }
-      return;
-    }
-
     const canvas = finalCanvasRef.current;
     if (!canvas) return;
 
     try {
-      const dataUrl = canvas.toDataURL("image/webp", 0.8);
+      // 履歴から読み込んだ画像（クロスドメイン汚染）であっても、一度Canvasに描画しているので
+      // toDataURL を用いて直接WebPとしてエクスポート（品質0.6）
+      const dataUrl = canvas.toDataURL("image/webp", 0.6);
+      
       const link = document.createElement("a");
       link.href = dataUrl;
-      link.download = `character_${Date.now()}.webp`;
+      link.download = `character_sprite_${Date.now()}.webp`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
     } catch (e) {
       console.error("Canvas export failed (possibly tainted)", e);
+      // フォールバック: 元の画像を直接開く
+      window.open(imageSource, '_blank');
     }
   };
 
