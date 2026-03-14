@@ -1,21 +1,31 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import ImageProcessor from "@/components/ImageProcessor";
 import { useCharacterHistory } from "@/hooks/useCharacterHistory";
 import { useBackgroundHistory } from "@/hooks/useBackgroundHistory";
+import { useNarrationHistory } from "@/hooks/useNarrationHistory";
 import GameDataForm from "@/components/GameDataForm";
 import MasterListData from "@/components/MasterListData";
 import { MonsterMasterData, monsterMasterRepository } from "@/data/repository/MonsterMasterRepository";
 import { useEffect } from "react";
 import { BACKGROUND_STYLE_CATEGORIES, BackgroundStyle, BACKGROUND_ATMOSPHERES } from "@/data/backgroundStyles";
+import { CHARACTER_STYLE_CATEGORIES } from "@/data/characterStyles";
+import { GEMINI_TTS_VOICES } from "@/data/voices";
+import { mergeWavFiles, estimateWavDuration } from "@/lib/wavUtils";
 
-const PRESET_PROMPT =
-  "Sprite sheet with exactly four evenly spaced horizontal poses of the same character. The character must be drawn SMALL and CENTERED within each pose space, leaving plenty of empty white space around it to ensure absolutely no cropping. Do NOT draw boxes, borders, or panels separating the poses. Solid white background, clear THICK black outer lines on the character only. Cartoon style. High contrast.";
+const CORE_LAYOUT_PROMPT =
+  "Sprite sheet with exactly four evenly spaced horizontal poses of the same character. The character must be drawn SMALL and CENTERED within each pose space, leaving plenty of empty white space around it to ensure absolutely no cropping. Do NOT draw boxes, borders, or panels separating the poses. Solid white background.";
 
 export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [animationStyle, setAnimationStyle] = useState("");
+  // Character Style states. Key is category ID, value is array of selected style values
+  const [selectedCharStyles, setSelectedCharStyles] = useState<Record<string, string[]>>({
+    "basic": ["Cartoon style, cell shaded, high contrast"], // Default
+    "outline": ["clear THICK black outer lines on the character only, High contrast contour"] // Default
+  });
+  
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedImageSource, setGeneratedImageSource] = useState<string | null>(null);
   const [processedWebP, setProcessedWebP] = useState<string | null>(null);
@@ -35,7 +45,7 @@ export default function Home() {
   const [bgAtmosphere, setBgAtmosphere] = useState("");
 
   // New states for Manage Mode
-  const [viewMode, setViewMode] = useState<'generate' | 'background' | 'manage'>('generate');
+  const [viewMode, setViewMode] = useState<'generate' | 'background' | 'narration' | 'manage'>('generate');
   const [selectedForMaster, setSelectedForMaster] = useState<string | null>(null);
   const [editMonster, setEditMonster] = useState<MonsterMasterData | null>(null);
   const [masterMonsters, setMasterMonsters] = useState<MonsterMasterData[]>([]);
@@ -43,6 +53,23 @@ export default function Home() {
 
   const { history, isLoading: isCharsLoading, saveToHistory: saveCharToHistory, deleteFromHistory: deleteCharFromHistory } = useCharacterHistory();
   const { backgrounds, isLoading: isBgsLoading, saveToHistory: saveBgToHistory, deleteFromHistory: deleteBgFromHistory } = useBackgroundHistory();
+  const { narrations, isLoading: isNarrationsLoading, saveNarration, deleteNarration, markAsUsedInMerge } = useNarrationHistory();
+
+  // Narration states
+  const [narrationText, setNarrationText] = useState("");
+  const [selectedVoice, setSelectedVoice] = useState("Kore");
+  const [narrationStyle, setNarrationStyle] = useState("");
+  const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
+  const [generatedAudioBase64, setGeneratedAudioBase64] = useState<string | null>(null);
+  const [narrationError, setNarrationError] = useState<string | null>(null);
+  const [isSavingNarration, setIsSavingNarration] = useState(false);
+  const [voiceGenderFilter, setVoiceGenderFilter] = useState<'all' | 'female' | 'male'>('all');
+  const audioRef = useRef<HTMLAudioElement>(null);
+  // Merge states
+  const [isMergeMode, setIsMergeMode] = useState(false);
+  const [selectedForMerge, setSelectedForMerge] = useState<string[]>([]);
+  const [mergeSilenceDuration, setMergeSilenceDuration] = useState(0.5);
+  const [mergedAudioBase64, setMergedAudioBase64] = useState<string | null>(null);
 
   const fetchMasterData = async () => {
     try {
@@ -64,7 +91,12 @@ export default function Home() {
     return !registeredUrls.has(url);
   });
 
-  const plannedPrompt = prompt ? `${prompt}${animationStyle ? `\n[Animation: ${animationStyle} loop]` : ""}\n\n${PRESET_PROMPT}` : "";
+  const generateStylePromptStr = () => {
+    const allSelectedValues = Object.values(selectedCharStyles).flat();
+    return allSelectedValues.length > 0 ? `${allSelectedValues.join(", ")}` : "";
+  };
+
+  const plannedPrompt = prompt ? `${prompt}${animationStyle ? `\n[Animation: ${animationStyle} loop]` : ""}\n\n[Style]\n${generateStylePromptStr()}\n\n[Layout]\n${CORE_LAYOUT_PROMPT}` : "";
 
   const plannedBgPrompt = (() => {
     if (!bgPrompt) return "";
@@ -98,9 +130,13 @@ export default function Home() {
 
       setGeneratedImageSource(`data:image/png;base64,${data.imageBase64}`);
       setLastUsedPrompt(`${prompt} (${animationStyle || '待機'})`);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(err);
-      setError(err.message);
+      if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError("An unknown error occurred");
+      }
     } finally {
       setIsGenerating(false);
     }
@@ -144,9 +180,13 @@ export default function Home() {
           setBgProcessedWebP(webp);
         }
       };
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(err);
-      setError(err.message);
+      if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError("An unknown error occurred");
+      }
     } finally {
       setIsGenerating(false);
     }
@@ -197,7 +237,7 @@ export default function Home() {
     }
   };
 
-  const loadFromHistory = (item: any) => { // Use 'any' or proper type CharacterHistoryItem
+  const loadFromHistory = (item: { imageUrl?: string; imageBase64?: string; prompt?: string }) => {
     const source = item.imageUrl || (item.imageBase64 ? `data:image/webp;base64,${item.imageBase64}` : "");
     if (!source) return;
     setGeneratedImageSource(source);
@@ -254,6 +294,12 @@ export default function Home() {
             🖼️ 背景生成モード
           </button>
           <button
+            onClick={() => setViewMode('narration')}
+            className={`px-6 py-2 rounded-md font-bold text-sm transition-all ${viewMode === 'narration' ? 'bg-white shadow text-amber-700' : 'text-gray-500 hover:text-gray-700'}`}
+          >
+            🎙️ ナレーション
+          </button>
+          <button
             onClick={() => setViewMode('manage')}
             className={`px-6 py-2 rounded-md font-bold text-sm transition-all ${viewMode === 'manage' ? 'bg-white shadow text-indigo-700' : 'text-gray-500 hover:text-gray-700'}`}
           >
@@ -275,6 +321,62 @@ export default function Home() {
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
           />
+        </div>
+
+        {/* --- Character Style Selection --- */}
+        <div className="mb-6">
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            デザインスタイル (Style Options)
+          </label>
+          <div className="space-y-4">
+            {CHARACTER_STYLE_CATEGORIES.map(category => (
+              <div key={category.id} className="bg-gray-50 p-3 rounded-lg border border-gray-100">
+                <div className="text-xs font-bold text-gray-500 mb-2 flex justify-between items-center">
+                  <span>{category.name}</span>
+                  <span className="text-[10px] font-normal bg-gray-200 px-2 py-0.5 rounded text-gray-600">
+                    {category.allowMultiple ? "複数選択可" : "1つのみ選択可"}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {category.styles.map(style => {
+                    const isSelected = (selectedCharStyles[category.id] || []).includes(style.value);
+                    return (
+                      <button
+                        key={style.value}
+                        onClick={() => {
+                          setSelectedCharStyles(prev => {
+                            const currentList = prev[category.id] || [];
+                            if (category.allowMultiple) {
+                              // Toggle
+                              return {
+                                ...prev,
+                                [category.id]: isSelected 
+                                  ? currentList.filter(v => v !== style.value)
+                                  : [...currentList, style.value]
+                              };
+                            } else {
+                              // Exclusive (replace or unselect if it was already selected to allow none)
+                              return {
+                                ...prev,
+                                [category.id]: isSelected ? [] : [style.value]
+                              };
+                            }
+                          });
+                        }}
+                        className={`px-3 py-1.5 text-xs rounded transition-colors border ${
+                          isSelected 
+                            ? "bg-blue-600 text-white border-blue-600 font-bold" 
+                            : "bg-white text-gray-700 border-gray-300 hover:bg-gray-100"
+                        }`}
+                      >
+                        {style.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
 
         <div className="mb-6">
@@ -644,6 +746,481 @@ export default function Home() {
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+      </div>
+      )}
+
+      {viewMode === 'narration' && (
+      <div className="w-full max-w-4xl bg-white p-8 rounded-xl shadow-sm">
+        {/* テキスト入力 */}
+        <div className="mb-6">
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            1. ナレーション原稿 (Narration Text)
+          </label>
+          <textarea
+            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            rows={5}
+            placeholder="ここにナレーション原稿を入力してください..."
+            value={narrationText}
+            onChange={(e) => setNarrationText(e.target.value)}
+          />
+          <p className="text-xs text-gray-400 mt-1">日本語は自動検出されます。</p>
+        </div>
+
+        {/* ボイス選択 */}
+        <div className="mb-6">
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            2. ボイス選択 (Voice)
+          </label>
+          <div className="flex gap-2 mb-3">
+            <button
+              onClick={() => setVoiceGenderFilter('all')}
+              className={`px-3 py-1 text-xs rounded-full border transition-all ${voiceGenderFilter === 'all' ? 'bg-amber-600 text-white border-amber-600' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+            >
+              すべて
+            </button>
+            <button
+              onClick={() => setVoiceGenderFilter('female')}
+              className={`px-3 py-1 text-xs rounded-full border transition-all ${voiceGenderFilter === 'female' ? 'bg-pink-500 text-white border-pink-500' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+            >
+              ♀ 女性
+            </button>
+            <button
+              onClick={() => setVoiceGenderFilter('male')}
+              className={`px-3 py-1 text-xs rounded-full border transition-all ${voiceGenderFilter === 'male' ? 'bg-blue-500 text-white border-blue-500' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+            >
+              ♂ 男性
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {GEMINI_TTS_VOICES
+              .filter(v => voiceGenderFilter === 'all' || v.gender === voiceGenderFilter)
+              .map(voice => (
+              <button
+                key={voice.name}
+                onClick={() => setSelectedVoice(voice.name)}
+                className={`px-3 py-1.5 text-xs rounded-lg border transition-all ${
+                  selectedVoice === voice.name
+                    ? 'bg-amber-500 text-white border-amber-500 shadow-sm'
+                    : 'bg-white text-gray-700 border-gray-200 hover:border-amber-300'
+                }`}
+                title={voice.tone}
+              >
+                <span>{voice.gender === 'female' ? '♀' : '♂'} {voice.label}</span>
+                <span className="block text-[10px] opacity-70">{voice.tone}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* スタイル指示 */}
+        <div className="mb-6">
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            3. スタイル指示（オプション）
+          </label>
+          <div className="flex gap-2 mb-3 flex-wrap">
+            {[
+              { label: "明るく", value: "Say cheerfully" },
+              { label: "落ち着いて", value: "Say calmly and soothingly" },
+              { label: "ウィスパー", value: "Say in a soft whisper" },
+              { label: "ドラマチック", value: "Say dramatically with emotion" },
+              { label: "ニュースキャスター風", value: "Say like a professional news anchor" },
+              { label: "ナレーター風", value: "Say like a documentary narrator, with gravitas" },
+              { label: "ゆっくり", value: "Say slowly and deliberately" },
+              { label: "早口で", value: "Say quickly with excitement" },
+            ].map(preset => (
+              <button
+                key={preset.value}
+                onClick={() => setNarrationStyle(preset.value)}
+                className={`px-3 py-1 text-xs rounded-full border transition-all ${
+                  narrationStyle === preset.value
+                    ? 'bg-amber-600 text-white border-amber-600 shadow-sm'
+                    : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50 hover:border-amber-200'
+                }`}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+          <input
+            type="text"
+            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:outline-none text-sm"
+            placeholder="自由にスタイルを指定（例: Say in a spooky whisper）"
+            value={narrationStyle}
+            onChange={(e) => setNarrationStyle(e.target.value)}
+          />
+        </div>
+
+        {/* 生成ボタン */}
+        <button
+          onClick={async () => {
+            if (!narrationText) return;
+            setIsGeneratingAudio(true);
+            setNarrationError(null);
+            setGeneratedAudioBase64(null);
+            try {
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 120_000); // 120秒タイムアウト
+              const res = await fetch("/api/tts", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  text: narrationText,
+                  voiceName: selectedVoice,
+                  stylePrompt: narrationStyle || undefined,
+                }),
+                signal: controller.signal,
+              });
+              clearTimeout(timeoutId);
+              const data = await res.json();
+              if (!res.ok) {
+                throw new Error(data.error || "音声生成に失敗しました");
+              }
+              setGeneratedAudioBase64(data.audioBase64);
+            } catch (err: unknown) {
+              console.error(err);
+              if (err instanceof DOMException && err.name === "AbortError") {
+                setNarrationError("音声生成がタイムアウトしました。テキストを短くして再試行してください。");
+              } else if (err instanceof TypeError && (err.message === "fetch failed" || err.message === "Failed to fetch")) {
+                setNarrationError("サーバーとの通信に失敗しました。音声生成に時間がかかりすぎた可能性があります。テキストを短くして再試行してください。");
+              } else {
+                setNarrationError(err instanceof Error ? err.message : "不明なエラーが発生しました");
+              }
+            } finally {
+              setIsGeneratingAudio(false);
+            }
+          }}
+          disabled={!narrationText || isGeneratingAudio}
+          className="w-full py-4 mt-2 bg-amber-600 text-white font-bold rounded-lg hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-lg"
+        >
+          {isGeneratingAudio ? "音声生成中..." : "🎙️ 音声を生成する"}
+        </button>
+
+        {narrationError && (
+          <div className="mt-4 p-4 text-red-700 bg-red-100 rounded-lg">
+            {narrationError}
+          </div>
+        )}
+
+        {/* 生成結果プレビュー */}
+        {generatedAudioBase64 && (
+          <div className="mt-8 border-t pt-8">
+            <h2 className="text-xl font-bold mb-4">🔊 生成プレビュー</h2>
+            <div className="bg-gray-50 p-6 rounded-xl border border-gray-100">
+              <audio
+                ref={audioRef}
+                controls
+                className="w-full mb-4"
+                src={`data:audio/wav;base64,${generatedAudioBase64}`}
+              />
+              <div className="flex gap-3">
+                <button
+                  onClick={() => {
+                    const link = document.createElement('a');
+                    link.href = `data:audio/wav;base64,${generatedAudioBase64}`;
+                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+                    link.download = `narration_${timestamp}.wav`;
+                    link.click();
+                  }}
+                  className="px-6 py-2 bg-green-600 text-white font-bold rounded-lg hover:bg-green-700 transition-colors text-sm"
+                >
+                  📥 WAVダウンロード
+                </button>
+                <button
+                  onClick={async () => {
+                    if (!generatedAudioBase64) return;
+                    setIsSavingNarration(true);
+                    try {
+                      await saveNarration({
+                        text: narrationText,
+                        voiceName: selectedVoice,
+                        stylePrompt: narrationStyle || undefined,
+                        audioBase64: generatedAudioBase64,
+                      });
+                      alert("ナレーションを保存しました！");
+                    } catch (err) {
+                      console.error("Failed to save narration:", err);
+                      setNarrationError("保存に失敗しました。");
+                    } finally {
+                      setIsSavingNarration(false);
+                    }
+                  }}
+                  disabled={isSavingNarration}
+                  className="px-6 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-colors text-sm disabled:opacity-50"
+                >
+                  {isSavingNarration ? "保存中..." : "💾 履歴に保存"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ナレーション履歴 */}
+        <div className="mt-12 pt-8 border-t">
+          <div className="flex justify-between items-center mb-6">
+            <h2 className="text-2xl font-bold text-gray-800">ナレーション履歴</h2>
+            {narrations.length >= 2 && (
+              <button
+                onClick={() => {
+                  setIsMergeMode(!isMergeMode);
+                  setSelectedForMerge([]);
+                  setMergedAudioBase64(null);
+                }}
+                className={`px-4 py-2 text-sm rounded-lg font-bold transition-all ${
+                  isMergeMode
+                    ? 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                    : 'bg-amber-100 text-amber-700 hover:bg-amber-200'
+                }`}
+              >
+                {isMergeMode ? '✕ 結合モード終了' : '🔗 音声を結合'}
+              </button>
+            )}
+          </div>
+
+          {/* 結合パネル */}
+          {isMergeMode && (
+            <div className="mb-6 p-4 bg-amber-50 rounded-xl border border-amber-200">
+              <p className="text-sm text-amber-800 mb-3 font-medium">
+                結合したいナレーションを選択してください（選択順に結合されます）
+              </p>
+              <div className="flex items-center gap-4 mb-4">
+                <label className="text-sm text-gray-700 font-medium">音声間の無音:</label>
+                <div className="flex gap-2">
+                  {[0, 0.5, 1, 1.5, 2, 3].map(sec => (
+                    <button
+                      key={sec}
+                      onClick={() => setMergeSilenceDuration(sec)}
+                      className={`px-3 py-1 text-xs rounded-full border transition-all ${
+                        mergeSilenceDuration === sec
+                          ? 'bg-amber-600 text-white border-amber-600'
+                          : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+                      }`}
+                    >
+                      {sec === 0 ? 'なし' : `${sec}秒`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => {
+                    if (selectedForMerge.length < 2) return;
+                    // 選択順にBase64データを取得
+                    const wavList = selectedForMerge
+                      .map(id => narrations.find(n => n.id === id))
+                      .filter((n): n is NonNullable<typeof n> => n != null)
+                      .map(n => n.audioBase64);
+                    try {
+                      const merged = mergeWavFiles(wavList, mergeSilenceDuration);
+                      setMergedAudioBase64(merged);
+                    } catch (err) {
+                      console.error('Merge failed:', err);
+                      setNarrationError('音声の結合に失敗しました。');
+                    }
+                  }}
+                  disabled={selectedForMerge.length < 2}
+                  className="px-6 py-2 bg-amber-600 text-white font-bold rounded-lg hover:bg-amber-700 transition-colors text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  🔗 {selectedForMerge.length}件を結合
+                </button>
+                {selectedForMerge.length > 0 && (
+                  <button
+                    onClick={() => setSelectedForMerge([])}
+                    className="text-xs text-gray-500 hover:text-gray-700"
+                  >
+                    選択解除
+                  </button>
+                )}
+                {selectedForMerge.length > 0 && (
+                  <span className="text-xs text-gray-400">
+                    合計 約 {Math.round(selectedForMerge
+                      .map(id => narrations.find(n => n.id === id))
+                      .filter((n): n is NonNullable<typeof n> => n != null)
+                      .reduce((sum, n) => sum + estimateWavDuration(n.audioBase64), 0)
+                      + mergeSilenceDuration * Math.max(0, selectedForMerge.length - 1)
+                    )}秒
+                  </span>
+                )}
+              </div>
+
+              {/* 結合プレビュー */}
+              {mergedAudioBase64 && (
+                <div className="mt-4 p-4 bg-white rounded-lg border border-amber-100">
+                  <p className="text-sm font-bold text-gray-700 mb-2">🔊 結合プレビュー</p>
+                  <audio
+                    controls
+                    className="w-full mb-3"
+                    src={`data:audio/wav;base64,${mergedAudioBase64}`}
+                  />
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => {
+                        const link = document.createElement('a');
+                        link.href = `data:audio/wav;base64,${mergedAudioBase64}`;
+                        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+                        link.download = `narration_merged_${timestamp}.wav`;
+                        link.click();
+                      }}
+                      className="px-4 py-2 bg-green-600 text-white font-bold rounded-lg hover:bg-green-700 transition-colors text-sm"
+                    >
+                      📥 結合WAVダウンロード
+                    </button>
+                    <button
+                      onClick={async () => {
+                        if (!mergedAudioBase64) return;
+                        setIsSavingNarration(true);
+                        try {
+                          const mergedTexts = selectedForMerge
+                            .map(id => narrations.find(n => n.id === id))
+                            .filter((n): n is NonNullable<typeof n> => n != null)
+                            .map(n => n.text);
+                          await saveNarration({
+                            text: `[結合] ${mergedTexts.join(' / ')}`,
+                            voiceName: 'merged',
+                            stylePrompt: `${selectedForMerge.length}件結合 (間隔:${mergeSilenceDuration}秒)`,
+                            audioBase64: mergedAudioBase64,
+                          });
+                          await markAsUsedInMerge([...selectedForMerge]);
+                          setSelectedForMerge([]);
+                          setMergedAudioBase64(null);
+                          alert('結合した音声を保存しました！');
+                        } catch (err) {
+                          console.error('Failed to save merged narration:', err);
+                          setNarrationError('結合音声の保存に失敗しました。');
+                        } finally {
+                          setIsSavingNarration(false);
+                        }
+                      }}
+                      disabled={isSavingNarration}
+                      className="px-4 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-colors text-sm disabled:opacity-50"
+                    >
+                      {isSavingNarration ? '保存中...' : '💾 履歴に保存'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {isNarrationsLoading ? (
+            <p className="text-gray-500">読み込み中...</p>
+          ) : narrations.length === 0 ? (
+            <p className="text-gray-500">ナレーションの履歴はありません。</p>
+          ) : (
+            <div className="space-y-4">
+              {narrations.map((item, index) => {
+                const mergeIndex = selectedForMerge.indexOf(item.id);
+                const isSelectedForMerge = mergeIndex !== -1;
+                const isMergedItem = item.voiceName === 'merged';
+                const isUsedInMerge = item.usedInMerge === true && !isMergedItem;
+                return (
+                <div
+                  key={item.id}
+                  className={`border rounded-lg p-4 shadow-sm hover:shadow-md transition-all ${
+                    isSelectedForMerge
+                      ? 'border-amber-400 bg-amber-50/50 ring-1 ring-amber-300'
+                      : isMergedItem
+                        ? 'border-amber-300 bg-gradient-to-r from-amber-50 to-orange-50'
+                        : isUsedInMerge
+                          ? 'border-green-300 bg-green-50/60'
+                          : 'border-gray-200'
+                  }`}
+                >
+                  {isMergedItem && (
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold bg-amber-500 text-white px-2 py-0.5 rounded-full">
+                        🔗 結合音声
+                      </span>
+                    </div>
+                  )}
+                  {isUsedInMerge && (
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold bg-green-500 text-white px-2 py-0.5 rounded-full">
+                        ✓ 結合済み
+                      </span>
+                    </div>
+                  )}
+                  <div className="flex justify-between items-start mb-2">
+                    <div className="flex items-start gap-3 flex-1">
+                      {isMergeMode && (
+                        <button
+                          onClick={() => {
+                            setMergedAudioBase64(null);
+                            setSelectedForMerge(prev =>
+                              isSelectedForMerge
+                                ? prev.filter(id => id !== item.id)
+                                : [...prev, item.id]
+                            );
+                          }}
+                          className={`mt-0.5 w-6 h-6 rounded border-2 flex items-center justify-center text-xs font-bold transition-all flex-shrink-0 ${
+                            isSelectedForMerge
+                              ? 'bg-amber-500 border-amber-500 text-white'
+                              : 'border-gray-300 text-transparent hover:border-amber-400'
+                          }`}
+                        >
+                          {isSelectedForMerge ? mergeIndex + 1 : ''}
+                        </button>
+                      )}
+                      <div className="flex-1">
+                        <p className="text-sm text-gray-800 mb-1 line-clamp-2">{item.text}</p>
+                        <div className="flex flex-wrap gap-2">
+                          <span className="text-[10px] bg-amber-50 text-amber-700 px-2 py-0.5 rounded font-medium">
+                            🎙️ {item.voiceName}
+                          </span>
+                          {item.stylePrompt && (
+                            <span className="text-[10px] bg-purple-50 text-purple-600 px-2 py-0.5 rounded">
+                              {item.stylePrompt}
+                            </span>
+                          )}
+                          <span className="text-[10px] text-gray-400">
+                            {new Date(item.createdAt).toLocaleString('ja-JP')}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <audio
+                    controls
+                    className="w-full mb-2"
+                    src={`data:audio/wav;base64,${item.audioBase64}`}
+                  />
+                  <div className="flex justify-between items-center">
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          const link = document.createElement('a');
+                          link.href = `data:audio/wav;base64,${item.audioBase64}`;
+                          link.download = `narration_${item.id.slice(0, 8)}.wav`;
+                          link.click();
+                        }}
+                        className="text-[11px] text-green-600 hover:text-green-800 font-bold"
+                      >
+                        📥 ダウンロード
+                      </button>
+                      <button
+                        onClick={() => {
+                          setNarrationText(item.text);
+                          setSelectedVoice(item.voiceName);
+                          setNarrationStyle(item.stylePrompt || "");
+                          window.scrollTo({ top: 0, behavior: 'smooth' });
+                        }}
+                        className="text-[11px] text-blue-500 hover:text-blue-700 font-bold"
+                      >
+                        🔄 再利用
+                      </button>
+                    </div>
+                    <button
+                      onClick={() => deleteNarration(item.id)}
+                      className="text-[11px] text-red-400 hover:text-red-600"
+                    >
+                      削除
+                    </button>
+                  </div>
+                </div>
+                );
+              })}
             </div>
           )}
         </div>
