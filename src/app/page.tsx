@@ -879,14 +879,19 @@ export default function Home() {
                 throw new Error(data.error || "音声生成に失敗しました");
               }
               setGeneratedAudioBase64(data.audioBase64);
-            } catch (err: unknown) {
-              console.error(err);
-              if (err instanceof DOMException && err.name === "AbortError") {
+            } catch (err: any) {
+              const isAbortError = err?.name === "AbortError" || (err instanceof DOMException && err.name === "AbortError");
+              
+              if (isAbortError) {
+                // タイムアウトや意図的な中断の場合はエラーログを吐かず（赤画面回避）、ユーザーへ通知のみ行う
                 setNarrationError("音声生成がタイムアウトしました。テキストを短くして再試行してください。");
-              } else if (err instanceof TypeError && (err.message === "fetch failed" || err.message === "Failed to fetch")) {
-                setNarrationError("サーバーとの通信に失敗しました。音声生成に時間がかかりすぎた可能性があります。テキストを短くして再試行してください。");
               } else {
-                setNarrationError(err instanceof Error ? err.message : "不明なエラーが発生しました");
+                console.error(err);
+                if (err instanceof TypeError && (err.message?.includes("fetch failed") || err.message?.includes("Failed to fetch"))) {
+                  setNarrationError("サーバーとの通信に失敗しました。音声生成に時間がかかりすぎた可能性があります。テキストを短くして再試行してください。");
+                } else {
+                  setNarrationError(err instanceof Error ? err.message : "不明なエラーが発生しました");
+                }
               }
             } finally {
               setIsGeneratingAudio(false);
